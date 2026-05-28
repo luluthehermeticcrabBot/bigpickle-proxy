@@ -36,18 +36,31 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # ── Model mapping ──────────────────────────────────────────────────────────
 
 MODEL_ALIASES = {
-    "big-pickle": "anthropic/claude-sonnet-4",
-    "claude-sonnet-4": "anthropic/claude-sonnet-4",
-    "claude-sonnet": "anthropic/claude-sonnet-4",
-    "claude-opus-4": "anthropic/claude-opus-4-20250514",
-    "claude-opus": "anthropic/claude-opus-4-20250514",
-    "claude-haiku": "anthropic/claude-3.5-haiku",
-    "gpt-4o": "openai/gpt-4o",
-    "gpt-4.1": "openai/gpt-4.1",
-    "gemini-flash": "google/gemini-2.5-flash",
+    # Primary OpenCode-built-in (free) models
+    "big-pickle":        "opencode/big-pickle",
+    "claude-sonnet-4":   "opencode/claude-sonnet-4",
+    "claude-sonnet":     "opencode/claude-sonnet-4",
+    "claude-opus-4":     "opencode/claude-opus-4-1",
+    "claude-opus":       "opencode/claude-opus-4-1",
+    "claude-haiku":      "opencode/claude-haiku-4-5",
+    "gpt-5":             "opencode/gpt-5.1",
+    "gpt-5-codex":       "opencode/gpt-5.1-codex",
+    "gpt-5.2":           "opencode/gpt-5.2",
+    "gpt-5.3-codex":     "opencode/gpt-5.3-codex",
+    "gpt-5.4":           "opencode/gpt-5.4",
+    "gemini-flash":      "opencode/gemini-3-flash",
+    "gemini-pro":        "opencode/gemini-3.1-pro",
+    # OpenCode Go (bring-your-own-key) models
+    "deepseek-v4-flash": "opencode-go/deepseek-v4-flash",
+    "deepseek-v4-pro":   "opencode-go/deepseek-v4-pro",
+    "kimi-k2.5":         "opencode-go/kimi-k2.5",
+    "kimi-k2.6":         "opencode-go/kimi-k2.6",
+    "qwen3.7-max":       "opencode-go/qwen3.7-max",
+    "glm-5":             "opencode-go/glm-5",
+    "mimo-v2.5":         "opencode-go/mimo-v2.5",
 }
 
-DEFAULT_MODEL = "anthropic/claude-sonnet-4"
+DEFAULT_MODEL = "opencode/big-pickle"
 
 
 def resolve_model(requested: str) -> str:
