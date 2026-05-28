@@ -336,6 +336,11 @@ class OpenCodeServeClient:
             json=body,
             timeout=300.0,
         )
+        if r.status_code >= 400:
+            error_body = r.text[:1000] if r.text else "(empty body)"
+            raise RuntimeError(
+                f"OpenCode serve returned {r.status_code}: {error_body}"
+            )
         r.raise_for_status()
 
         # Response is a JSON stream: one complete MessageV2.WithParts object.
