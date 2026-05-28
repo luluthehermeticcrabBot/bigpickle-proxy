@@ -1,0 +1,21 @@
+services:
+  bigpickle-proxy-cli:
+    build: .
+    ports:
+      - "8000:8000"
+    command: ["--mode", "cli", "--timeout", "180"]
+    # Sandbox: no meaningful files, isolated network if desired
+    read_only: true
+    tmpfs:
+      - /sandbox:exec,uid=1000,gid=1000
+      - /tmp:exec
+
+  # Alternative: serve mode (faster, shared session)
+  bigpickle-proxy-serve:
+    build: .
+    ports:
+      - "8000:8000"
+    command: ["--mode", "serve", "--serve-port", "4096"]
+    profiles: ["serve"]
+    # Note: serve mode expects opencode serve already running.
+    # Use docker-compose exec or a sidecar container to start it.
