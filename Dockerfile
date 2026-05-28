@@ -11,9 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://opencode.ai/install | bash \
     && mv /root/.opencode/bin/opencode /usr/local/bin/opencode
 
-# Configure OpenCode permissions (deny tool execution)
-RUN mkdir -p /root/.config/opencode && \
-    echo '{"permissions":{"*":"deny"}}' > /root/.config/opencode/opencode.json
+# Configure OpenCode (permission deny happens at session level via API)
+RUN mkdir -p /root/.config/opencode
 
 # Install Python + proxy deps
 RUN apt-get update && apt-get install -y --no-install-recommends \

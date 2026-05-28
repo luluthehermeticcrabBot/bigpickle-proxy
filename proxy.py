@@ -315,8 +315,14 @@ class OpenCodeServeClient:
             return False
 
     async def create_session(self) -> str:
+        """Create session with all tool permissions denied by default."""
         client = await self._get_client()
-        r = await client.post(f"{self.base_url}/session", json={})
+        body = {
+            "permission": [
+                {"permission": "*", "pattern": "*", "action": "deny"}
+            ]
+        }
+        r = await client.post(f"{self.base_url}/session", json=body)
         r.raise_for_status()
         return r.json()["id"]
 
