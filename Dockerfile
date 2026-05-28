@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://opencode.ai/install | bash \
     && mv /root/.opencode/bin/opencode /usr/local/bin/opencode
 
-# Configure OpenCode permissions (deny tool execution — see README)
+# Configure OpenCode permissions (deny tool execution)
 RUN mkdir -p /root/.config/opencode && \
     echo '{"permissions":{"*":"deny"}}' > /root/.config/opencode/opencode.json
 
@@ -24,9 +24,10 @@ COPY requirements.txt /app/
 RUN pip3 install --break-system-packages -r /app/requirements.txt
 
 COPY proxy.py /app/
+COPY entrypoint.sh /app/
+RUN chmod +x /app/entrypoint.sh
 
 WORKDIR /sandbox
-EXPOSE 8000
+EXPOSE 8000 4096
 
-ENTRYPOINT ["python3", "/app/proxy.py", "--host", "0.0.0.0", "--port", "8000"]
-CMD ["--mode", "cli"]
+ENTRYPOINT ["/app/entrypoint.sh"]
