@@ -167,11 +167,20 @@ def parse_opencode_parts(parts: list[dict]) -> tuple[str, list[dict], dict]:
             call_id = part.get("callID", str(uuid.uuid4().hex[:12]))
             tool_name = part.get("tool", "unknown")
 
-            # Try multiple possible argument field names
-            args = part.get("args") or part.get("arguments") or \
-                   part.get("input") or part.get("parameters") or {}
+            # Arguments live in state.input (confirmed from OpenCode ToolPart)
+            state = part.get("state", {})
+            args = state.get("input", {})
+            # Fallbacks: top-level fields, string parsing
+            if not args:
+                args = part.get("args") or part.get("arguments") or \
+                       part.get("input") or part.get("parameters") or {}
             if isinstance(args, dict):
                 args_str = json.dumps(args)
+            elif isinstance(args, str):
+                try:
+                    args_str = json.dumps(json.loads(args))
+                except (json.JSONDecodeError, TypeError):
+                    args_str = args
             else:
                 args_str = str(args)
 
