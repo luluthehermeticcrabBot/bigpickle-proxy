@@ -393,6 +393,15 @@ class OpenCodeServeClient:
 
         text, tool_calls, usage = parse_opencode_parts(parts)
 
+        # Debug: log raw parts when tool calls are detected
+        if tool_calls:
+            import sys
+            print(f"\n[DEBUG] Tool calls detected — raw parts:", file=sys.stderr)
+            for i, p in enumerate(parts):
+                if p.get("type") == "tool":
+                    print(f"  Part[{i}]: {json.dumps(p, indent=2)}", file=sys.stderr)
+            print(file=sys.stderr)
+
         return {
             "text": text,
             "tool_calls": tool_calls,
@@ -449,11 +458,15 @@ async def chat_completions(request: Request):
     if openai_tools and config.get("mode") == "serve":
         tool_desc = _format_tools_for_prompt(openai_tools)
         prompt = (
+            "IMPORTANT: You have been given a specific set of tools below. "
+            "IGNORE any other tools you may know about (like read, write, edit, bash, grep, glob). "
+            "ONLY use the tools listed here. "
+            "Other tools do not work in this environment.\n\n"
             f"{tool_desc}\n\n"
-            f"When you need to use a tool, respond with a tool call in this JSON format:\n"
-            f'{{"name": "<tool_name>", "arguments": {{...}}}}\n\n'
-            f"The user will execute the tool and return the result.\n\n"
-            f"---\n\n"
+            "When you need to use one of these tools, call it using the standard "
+            "function calling format. The calling system will execute it and "
+            "return the result for you to continue.\n\n"
+            "---\n\n"
             f"{prompt}"
         )
 
