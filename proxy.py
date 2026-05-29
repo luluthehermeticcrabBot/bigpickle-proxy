@@ -67,6 +67,101 @@ DEFAULT_MODEL = "opencode/big-pickle"
 
 OPENCODE_CLOUD_URL = "https://opencode.ai/zen/v1/chat/completions"
 
+# OpenWebUI rejects SSE chunks above ~16KB. Big Pickle's verbose reasoning
+# can produce single chunks of 50KB+. Split at sentence boundaries.
+SSE_MAX_CHUNK = 8192
+
+
+def _split_sse_chunk(line: str) -> list[str]:
+    """
+    Split an oversized SSE data line into smaller valid chunks.
+    Preserves the SSE format: yields 'data: {...}\\n\\n' lines.
+    """
+    prefix = ""
+    if line.startswith("data: "):
+        prefix = "data: "
+        json_str = line[6:]
+    elif line.startswith("data:"):
+        prefix = "data:"
+        json_str = line[5:]
+    else:
+        # Not a data line, pass through as-is
+        return [f"{line}\\n\\n"]
+
+    # Non-data lines (comments, [DONE]) pass through
+    if not json_str.strip().startswith("{"):
+        return [f"{line}\\n\\n"]
+
+    # Check if it's small enough
+    if len(line) <= SSE_MAX_CHUNK:
+        return [f"{line}\\n\\n"]
+
+    # Parse and split the content field(s)
+    try:
+        chunk = json.loads(json_str)
+    except json.JSONDecodeError:
+        return [f"{line}\\n\\n"]
+
+    # Find the content-bearing field in the delta
+    delta = chunk.get("choices", [{}])[0].get("delta", {})
+    content = delta.get("content", "")
+    reasoning = delta.get("reasoning_content", "")
+
+    # If no oversized content, pass through
+    if not content and not reasoning:
+        return [f"{line}\\n\\n"]
+
+    target_field = "reasoning_content" if reasoning else "content"
+    text = reasoning or content
+
+    if len(text) <= 2048:
+        return [f"{line}\\n\\n"]
+
+    # Split text at sentence boundaries (~1KB per chunk for streaming feel)
+    sentences = _split_text(text, chunk_size=1024)
+    if len(sentences) <= 1:
+        return [f"{line}\\n\\n"]
+
+    # Emit multiple chunks with progressive content
+    result = []
+    for i, sentence in enumerate(sentences):
+        new_chunk = json.loads(json_str)  # deep copy
+        new_chunk["choices"][0]["delta"] = {
+            k: (sentence if k == target_field else v)
+            for k, v in delta.items()
+        }
+        result.append(f"{prefix}{json.dumps(new_chunk)}\\n\\n")
+    return result
+
+
+def _split_text(text: str, chunk_size: int = 1024) -> list[str]:
+    """Split text at sentence boundaries, keeping chunks under chunk_size."""
+    import re
+    parts = []
+    current = ""
+
+    # Split on sentence endings: . ! ? followed by space or newline
+    tokens = re.split(r"(?<=[.!?])\\s+", text)
+
+    for token in tokens:
+        if len(current) + len(token) + 1 <= chunk_size:
+            current = (current + " " + token).strip() if current else token
+        else:
+            if current:
+                parts.append(current)
+            # If a single sentence is still too big, force-split it
+            if len(token) > chunk_size:
+                for i in range(0, len(token), chunk_size):
+                    parts.append(token[i:i + chunk_size])
+                current = ""
+            else:
+                current = token
+
+    if current:
+        parts.append(current)
+
+    return parts if len(parts) > 1 else [text]
+
 
 def _make_cloud_headers() -> dict:
     """Generate UUID headers for OpenCode cloud API auth."""
@@ -78,52 +173,6 @@ def _make_cloud_headers() -> dict:
         "x-opencode-request": str(uuid.uuid4()),
         "x-opencode-client": "opencode",
     }
-
-
-async def _forward_cloud(
-    client: httpx.AsyncClient,
-    body: dict,
-    stream: bool = False,
-) -> dict:
-    """
-    Forward a chat completion request to OpenCode cloud API.
-    Returns OpenAI-format response dict. Raises RuntimeError on failure.
-    """
-    # Build payload — strip proxy-only fields, keep OpenAI-format
-    payload = {
-        "model": body.get("model", "big-pickle"),
-        "messages": body.get("messages", []),
-        "max_tokens": body.get("max_tokens", 4096),
-        "temperature": body.get("temperature", 0.7),
-        "stream": stream,
-    }
-    # Forward tool definitions if present
-    if body.get("tools"):
-        payload["tools"] = body["tools"]
-    if body.get("tool_choice"):
-        payload["tool_choice"] = body["tool_choice"]
-
-    headers = _make_cloud_headers()
-
-    r = await client.post(
-        OPENCODE_CLOUD_URL,
-        json=payload,
-        headers=headers,
-        timeout=300.0,
-    )
-
-    if r.status_code >= 400:
-        error_body = r.text[:1000] if r.text else "(empty body)"
-        raise RuntimeError(
-            f"OpenCode cloud API returned {r.status_code}: {error_body}"
-        )
-
-    try:
-        return r.json()
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            f"OpenCode cloud API returned non-JSON: {r.text[:500]}"
-        )
 
 
 def resolve_model(requested: str) -> str:
@@ -587,21 +636,24 @@ async def chat_completions(request: Request):
             # Cloud API uses plain model names — pass through as-is, no prefix
             model_resolved = requested_model
 
-            if stream:
-                # Real streaming: forward SSE from OpenCode cloud API
-                headers = _make_cloud_headers()
-                payload = {
-                    "model": model_resolved,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "stream": True,
-                }
-                if openai_tools:
-                    payload["tools"] = openai_tools
-                if tool_choice and tool_choice != "auto":
-                    payload["tool_choice"] = tool_choice
+            # Always stream from upstream to avoid oversized single-line
+            # responses that trigger OpenWebUI's aiohttp "Chunk too big" error.
+            # For non-streaming clients, we buffer the stream and return JSON.
+            headers = _make_cloud_headers()
+            payload = {
+                "model": model_resolved,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,  # Always stream from upstream
+            }
+            if openai_tools:
+                payload["tools"] = openai_tools
+            if tool_choice and tool_choice != "auto":
+                payload["tool_choice"] = tool_choice
 
+            if stream:
+                # Client wants streaming — forward SSE with chunk splitting
                 async def _cloud_stream():
                     async with _httpx.AsyncClient(timeout=300.0) as sc:
                         async with sc.stream(
@@ -617,37 +669,118 @@ async def chat_completions(request: Request):
                                 yield "data: [DONE]\\n\\n"
                                 return
                             async for line in resp.aiter_lines():
-                                if line:
-                                    yield f"{line}\\n\\n"
+                                if not line:
+                                    continue
+                                for chunk_line in _split_sse_chunk(line):
+                                    yield chunk_line
 
                 return StreamingResponse(
                     _cloud_stream(),
                     media_type="text/event-stream",
                 )
 
-            # Non-streaming cloud request
-            cloud_body = {
-                "model": model_resolved,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
-            if openai_tools:
-                cloud_body["tools"] = openai_tools
-            if tool_choice and tool_choice != "auto":
-                cloud_body["tool_choice"] = tool_choice
+            # Client wants non-streaming — buffer the SSE stream, return JSON
+            chunks: list[dict] = []
+            finish_reason = "stop"
+            usage = {}
+            merged_content = ""
+            merged_reasoning = ""
 
-            async with _httpx.AsyncClient(timeout=300.0) as cloud_client:
-                result = await _forward_cloud(cloud_client, cloud_body)
+            async with _httpx.AsyncClient(timeout=300.0) as sc:
+                async with sc.stream(
+                    "POST",
+                    OPENCODE_CLOUD_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=300.0,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        body = await resp.aread()
+                        raise RuntimeError(
+                            f"OpenCode cloud API returned {resp.status_code}: "
+                            f"{body.decode()[:500]}"
+                        )
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        chunks.append(chunk)
 
-            # OpenCode cloud returns OpenAI format — pass through with proxy IDs
+            # Merge all chunks into a single response
+            tool_calls_map: dict[int, dict] = {}  # index -> tool_call dict
+            for chunk in chunks:
+                choices = chunk.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    if delta.get("content"):
+                        merged_content += delta["content"]
+                    if delta.get("reasoning_content"):
+                        merged_reasoning += delta["reasoning_content"]
+                    # Accumulate tool calls from streaming deltas
+                    tc_delta = delta.get("tool_calls", [])
+                    for tc in tc_delta:
+                        idx = tc.get("index", 0)
+                        if idx not in tool_calls_map:
+                            tool_calls_map[idx] = {
+                                "id": tc.get("id", ""),
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        entry = tool_calls_map[idx]
+                        if tc.get("id"):
+                            entry["id"] = tc["id"]
+                        func = tc.get("function", {})
+                        if func.get("name"):
+                            entry["function"]["name"] += func["name"]
+                        if func.get("arguments"):
+                            entry["function"]["arguments"] += func["arguments"]
+                    fr = choices[0].get("finish_reason")
+                    if fr:
+                        finish_reason = fr
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+
+            message = {"role": "assistant"}
+            if merged_content:
+                message["content"] = merged_content
+            else:
+                message["content"] = None
+            if merged_reasoning:
+                message["reasoning_content"] = merged_reasoning
+            if tool_calls_map:
+                message["tool_calls"] = [
+                    tool_calls_map[i] for i in sorted(tool_calls_map)
+                ]
+
             request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-            if isinstance(result, dict):
-                result["id"] = request_id
-                result["model"] = requested_model
-                if "created" not in result:
-                    result["created"] = int(time.time())
-            return result
+            result = {
+                "id": request_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": requested_model,
+                "choices": [{
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason,
+                }],
+                "usage": usage,
+            }
+            # Pretty-print JSON to avoid OpenWebUI's aiohttp "Chunk too big"
+            # error. aiohttp reads HTTP bodies line-by-line via readuntil();
+            # a single 50KB unindented JSON line triggers its limit.
+            # Indentation breaks response into short lines, each under 16KB.
+            from fastapi.responses import Response as _Response
+            pretty = json.dumps(result, indent=2, ensure_ascii=False)
+            return _Response(
+                content=pretty,
+                media_type="application/json",
+            )
 
         elif mode == "serve":
             serve_port = config.get("serve_port", 4096)
