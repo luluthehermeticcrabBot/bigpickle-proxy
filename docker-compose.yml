@@ -3,6 +3,13 @@ services:
     build: .
     ports:
       - "8000:8000"
-    # Container runs both opencode serve + proxy internally
-    command: ["serve"]
+    command: ["cloud"]
     restart: unless-stopped
+
+  # Optional: serve mode with local OpenCode (requires OpenCode installed in image)
+  # bigpickle-proxy-serve:
+  #   build: .
+  #   ports:
+  #     - "8000:8000"
+  #   command: ["serve"]
+  #   restart: unless-stopped

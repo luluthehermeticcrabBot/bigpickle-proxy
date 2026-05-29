@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Start opencode serve + proxy inside container
+# Start proxy inside container
 set -e
 
-MODE="${1:-serve}"
+MODE="${1:-cloud}"
 SERVE_PORT="${2:-4096}"
 PROXY_PORT="${3:-8000}"
+
+if [ "$MODE" = "cloud" ]; then
+    echo "=== Starting proxy in Cloud mode (no local OpenCode needed) ==="
+    exec python3 /app/proxy.py --host 0.0.0.0 --port "$PROXY_PORT" --mode cloud
+fi
 
 if [ "$MODE" = "cli" ]; then
     echo "=== Starting proxy in CLI mode ==="

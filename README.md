@@ -1,19 +1,16 @@
-# Big Pickle Proxy v0.2.0
+# Big Pickle Proxy v0.3.0
 
-OpenAI-compatible API that forwards inference calls to OpenCode, giving your agent harness access to Big Pickle (Claude) through a legitimate OpenCode instance.
-
-**New in v0.2.0: Tool-call forwarding in serve mode.**
+OpenAI-compatible API proxy that forwards inference calls to OpenCode's cloud API
+using UUID-based authentication. **No API key needed.** No local OpenCode
+installation. Just the proxy and your agent harness.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
+python proxy.py --port 8000
 
-# CLI mode (text-only, no tool calls)
-python proxy.py --port 8000 --mode cli
-
-# Serve mode (faster, tool-call support)
-python proxy.py --port 8000 --mode serve --serve-port 4096
+# Default mode is "cloud" — connects directly to OpenCode Zen API
 ```
 
 Test:
@@ -27,141 +24,88 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+List available models:
+
+```bash
+curl http://127.0.0.1:8000/v1/models
+```
+
 ## Modes
 
+### Cloud Mode (`--mode cloud`) — Default, Recommended
+
+Forwards requests directly to `https://opencode.ai/zen/v1/chat/completions` with
+per-request UUID headers (`x-opencode-project`, `x-opencode-session`,
+`x-opencode-request`, `x-opencode-client`). No Bearer token — the UUIDs
+authenticate access to OpenCode's free models.
+
+- **No local OpenCode** required
+- **No session management** — stateless like OpenAI API
+- **Tool calls** passed through natively (OpenAI format in → OpenAI format out)
+- **Streaming** via SSE pass-through from cloud API
+- **Model discovery** — `/v1/models` fetches live from Zen API
+
 ### CLI Mode (`--mode cli`)
-- Spawns `opencode -p "..." -q -f json -m <model>` per request
-- Text-only, no tool call support
-- Each request runs in an isolated temp directory
-- ~2s cold start, good for low-volume use
 
-### Serve Mode (`--mode serve`) — Recommended
-- Uses `opencode serve` HTTP API directly
-- **Tool-call forwarding:** captures tool_call events and returns them in OpenAI format
-- Lower latency (~200ms), session reuse
-- Supports streaming (`stream: true`)
+Spawns `opencode -p "..." -q -f json -m <model>` per request. Requires OpenCode
+installed locally. Text-only, no tool calls, ~2s cold start per request.
 
-## Tool Call Flow (Serve Mode)
+### Serve Mode (`--mode serve`)
 
-```
-Your Agent                    Big Pickle Proxy              OpenCode Serve
-    │                              │                             │
-    │  POST /v1/chat/completions   │                             │
-    │  {tools: [read_file, ...]}   │                             │
-    │─────────────────────────────>│                             │
-    │                              │  POST /session              │
-    │                              │────────────────────────────>│
-    │                              │  POST /session/:id/message  │
-    │                              │  (prompt + tool definitions)│
-    │                              │────────────────────────────>│
-    │                              │                             │
-    │                              │  Big Pickle sees tools,     │
-    │                              │  generates tool_call events │
-    │                              │  OpenCode DENIES execution  │
-    │                              │  (permissions: deny-all)    │
-    │                              │<────────────────────────────│
-    │                              │                             │
-    │  {                           │                             │
-    │    choices: [{               │                             │
-    │      finish_reason:          │                             │
-    │        "tool_calls",         │                             │
-    │      message: {              │                             │
-    │        tool_calls: [{        │                             │
-    │          function: {         │                             │
-    │            name: "read_file",│                             │
-    │            arguments: "..."  │                             │
-    │          }                   │                             │
-    │        }]                    │                             │
-    │      }                       │                             │
-    │    }]                        │                             │
-    │  }                           │                             │
-    │<─────────────────────────────│                             │
-    │                              │                             │
-    │  (Agent executes read_file)  │                             │
-    │                              │                             │
-    │  POST /v1/chat/completions   │                             │
-    │  {messages: [                │                             │
-    │    {role: "assistant",       │                             │
-    │     tool_calls: [...]},      │                             │
-    │    {role: "tool",            │                             │
-    │     tool_call_id: "...",     │                             │
-    │     content: "file contents"}│                             │
-    │  ]}                          │                             │
-    │─────────────────────────────>│                             │
-    │                              │  Tool results formatted     │
-    │                              │  inline in prompt           │
-    │                              │  POST /session/:id/message  │
-    │                              │────────────────────────────>│
-    │                              │                             │
-    │                              │  Big Pickle continues with  │
-    │                              │  tool results in context    │
-    │                              │<────────────────────────────│
-    │                              │                             │
-    │  {choices: [{message:        │                             │
-    │    {content: "Final answer"}}]}                            │
-    │<─────────────────────────────│                             │
-```
+Connects to a local `opencode serve` HTTP API. Requires OpenCode installed and
+`opencode serve` running on the configured port. Supports tool calls via
+ToolPart parsing.
 
-### Required: Set OpenCode Permissions to Deny
+## Free Models
 
-For tool-call forwarding to work (OpenCode captures but doesn't execute), configure `~/.opencode.json`:
+The following models are available through the Zen API **without any API key**:
 
-```json
-{
-  "permissions": {
-    "*": "deny"
-  }
-}
-```
+| Model | Backend | Notes |
+|---|---|---|
+| `big-pickle` | DeepSeek V3 | Reasoning model, verbose thinking |
+| `deepseek-v4-flash-free` | DeepSeek V4 Flash | Fast, lightweight |
+| `nemotron-3-super-free` | NVIDIA Nemotron 3 | Balanced performance |
+| `mimo-v2.5-free` | Mimo V2.5 | Multilingual |
 
-Or via the serve API (check `/doc` for the exact endpoint — typically `PATCH /session/:id` with permission settings).
+Run `curl http://127.0.0.1:8000/v1/models` for the live list — it queries the
+Zen API directly.
 
-**If permissions aren't denied:** OpenCode will execute tools locally AND the proxy returns them to your agent → double execution.
+**Formerly free, now require OpenCode Go subscription:**
+`minimax-m2.5-free`, `qwen3.6-plus-free`
 
-**Testing tool calls:**
+## Tool Calling (Cloud Mode)
+
+Tool calls are forwarded natively — the proxy passes your `tools` array to the
+OpenCode Zen API and returns the `tool_calls` response in standard OpenAI format.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "big-pickle",
-    "messages": [
-      {"role": "user", "content": "Read the file README.md"}
-    ],
-    "tools": [
-      {
-        "type": "function",
-        "function": {
-          "name": "read_file",
-          "description": "Read a file from disk",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "path": {
-                "type": "string",
-                "description": "Path to the file"
-              }
-            }
-          }
+    "messages": [{"role": "user", "content": "What is 2+2? Use the calculator."}],
+    "max_tokens": 2000,
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "calculator",
+        "description": "Performs arithmetic",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expression": {"type": "string", "description": "Math expression"}
+          },
+          "required": ["expression"]
         }
       }
-    ]
+    }]
   }'
 ```
 
-Expected: Response contains `"finish_reason": "tool_calls"` with a `read_file` tool call.
-
-## Model Aliases
-
-| Alias | OpenCode Model String |
-|-------|----------------------|
-| `big-pickle` | `anthropic/claude-sonnet-4` |
-| `claude-sonnet-4` | `anthropic/claude-sonnet-4` |
-| `claude-opus-4` | `anthropic/claude-opus-4-20250514` |
-| `claude-haiku` | `anthropic/claude-3.5-haiku` |
-| `gpt-4o` | `openai/gpt-4o` |
-| `gpt-4.1` | `openai/gpt-4.1` |
-| `gemini-flash` | `google/gemini-2.5-flash` |
+**Multi-turn caveat:** Big Pickle (DeepSeek backend) requires `reasoning_content`
+to be preserved across turns. When your agent receives an assistant message with
+`reasoning_content`, pass it back unchanged in subsequent requests. Most agent
+harnesses (Hermes, OpenAI SDK) handle this automatically.
 
 ## Use With Agent Harnesses
 
@@ -173,6 +117,12 @@ client = OpenAI(
     api_key="not-needed",
 )
 
+# List available models
+models = client.models.list()
+for m in models.data:
+    print(m.id)
+
+# Chat completion
 response = client.chat.completions.create(
     model="big-pickle",
     messages=[{"role": "user", "content": "Explain quantum computing"}],
@@ -183,39 +133,56 @@ response = client.chat.completions.create(
             "description": "Search the web",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string"}
-                }
+                "properties": {"query": {"type": "string"}}
             }
         }
     }],
 )
+print(response.choices[0].message.content)
 ```
-
-## Performance Notes
-
-| Mode | Cold Start | Per-Request | Tool Calls | Streaming |
-|------|-----------|-------------|------------|-----------|
-| CLI  | N/A       | ~2-5s       | ❌         | ❌         |
-| Serve | ~5s (once) | ~0.2-2s    | ✅         | ✅ (fake)  |
 
 ## Container Deployment
 
 ```bash
-docker-compose up -d bigpickle-proxy-cli
+docker-compose up -d
 ```
 
-Or build manually:
+## Performance
 
-```bash
-docker build -t bigpickle-proxy .
-docker run -p 8000:8000 bigpickle-proxy --mode cli
+| Mode | Cold Start | Per-Request | Tool Calls | Streaming | Local OpenCode |
+|------|-----------|-------------|------------|-----------|----------------|
+| Cloud | None | ~1-5s | ✅ | ✅ (real SSE) | Not needed |
+| Serve | ~5s (once) | ~0.2-2s | ✅ | ✅ (fake) | Required |
+| CLI | ~2s | ~2-5s | ❌ | ❌ | Required |
+
+## Architecture
+
+```
+Your Agent (OpenAI SDK)
+    │
+    │  POST /v1/chat/completions
+    │  (standard OpenAI format)
+    ▼
+Big Pickle Proxy (FastAPI)
+    │
+    │  POST https://opencode.ai/zen/v1/chat/completions
+    │  + UUID headers (project, session, request, client)
+    ▼
+OpenCode Zen Cloud API
+    │
+    │  Returns OpenAI-format response
+    ▼
+Your Agent ← proxy passes through with proxy IDs
 ```
 
 ## Limitations
 
-- CLI mode: text-only, no tool calls, no streaming
-- Serve mode streaming is fake (buffers full response, sends as one chunk)
-- Token counts may be 0 (OpenCode doesn't expose them in all modes)
-- Tool-call argument parsing depends on OpenCode's internal ToolPart format — test with your OpenCode version
-- Session management: each request is a new OpenCode session (stateless like OpenAI API)
+- Free models only — paid models require an API key (not yet supported)
+- Big Pickle's `reasoning_content` must be preserved across multi-turn conversations
+- Token counts and costs are reported as returned by the Zen API
+- Cloud mode rate limits are determined by OpenCode (no control from proxy side)
+- Previously-free models may have their promotions ended without notice — use `/v1/models` to check
+
+## License
+
+MIT

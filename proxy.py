@@ -132,14 +132,20 @@ def resolve_model(requested: str) -> str:
 
 
 def list_known_models() -> list[dict]:
-    """Return OpenAI-format model list."""
+    """Return OpenAI-format model list (static fallback)."""
     models = []
-    for alias, full in MODEL_ALIASES.items():
+    # Confirmed free models on OpenCode Zen (UUID auth, no API key)
+    for model_id in [
+        "big-pickle",
+        "deepseek-v4-flash-free",
+        "nemotron-3-super-free",
+        "mimo-v2.5-free",
+    ]:
         models.append({
-            "id": alias,
+            "id": model_id,
             "object": "model",
             "created": 1718400000,
-            "owned_by": "opencode-proxy",
+            "owned_by": "opencode",
         })
     return models
 
@@ -505,7 +511,26 @@ async def health():
 
 
 @app.get("/v1/models")
-async def list_models():
+async def list_models(request: Request):
+    """Return available models — fetched live from OpenCode Zen API."""
+    mode = config.get("mode", "cloud")
+
+    if mode == "cloud":
+        import httpx as _httpx
+        try:
+            headers = _make_cloud_headers()
+            async with _httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    "https://opencode.ai/zen/v1/models",
+                    headers=headers,
+                    timeout=10.0,
+                )
+                if r.status_code == 200:
+                    return r.json()
+        except Exception:
+            pass  # Fall through to static list
+
+    # Static fallback (used for cli/serve modes or if Zen is unreachable)
     return {"object": "list", "data": list_known_models()}
 
 
@@ -797,6 +822,8 @@ def main():
     print(f"  Models:    {', '.join(MODEL_ALIASES.keys())}")
     if args.mode == "cloud":
         print(f"  Cloud API: {OPENCODE_CLOUD_URL}")
+        free_models = [m["id"] for m in list_known_models()]
+        print(f"  Free models: {', '.join(free_models)}")
         print(f"  Tool calls: enabled (forwarded to cloud API)")
         print(f"  Streaming:  enabled")
     if args.mode == "serve":
