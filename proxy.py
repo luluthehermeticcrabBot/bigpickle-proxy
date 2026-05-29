@@ -5,6 +5,7 @@ Big Pickle Proxy — OpenAI-compatible API that forwards to OpenCode.
 Modes:
   cli    — uses `opencode -p` (simpler, stateless, ~2s cold start per request)
   serve  — uses `opencode serve` HTTP API (faster, supports tool calls)
+  cloud  — forwards directly to OpenCode cloud API (no local OpenCode, UUID auth)
 
 Usage:
   python proxy.py --port 8000 --mode cli
@@ -61,6 +62,68 @@ MODEL_ALIASES = {
 }
 
 DEFAULT_MODEL = "opencode/big-pickle"
+
+# ── Cloud API backend ──────────────────────────────────────────────────────
+
+OPENCODE_CLOUD_URL = "https://opencode.ai/zen/v1/chat/completions"
+
+
+def _make_cloud_headers() -> dict:
+    """Generate UUID headers for OpenCode cloud API auth."""
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": "opencode/1.0.0",
+        "x-opencode-project": str(uuid.uuid4()),
+        "x-opencode-session": str(uuid.uuid4()),
+        "x-opencode-request": str(uuid.uuid4()),
+        "x-opencode-client": "opencode",
+    }
+
+
+async def _forward_cloud(
+    client: httpx.AsyncClient,
+    body: dict,
+    stream: bool = False,
+) -> dict:
+    """
+    Forward a chat completion request to OpenCode cloud API.
+    Returns OpenAI-format response dict. Raises RuntimeError on failure.
+    """
+    # Build payload — strip proxy-only fields, keep OpenAI-format
+    payload = {
+        "model": body.get("model", "big-pickle"),
+        "messages": body.get("messages", []),
+        "max_tokens": body.get("max_tokens", 4096),
+        "temperature": body.get("temperature", 0.7),
+        "stream": stream,
+    }
+    # Forward tool definitions if present
+    if body.get("tools"):
+        payload["tools"] = body["tools"]
+    if body.get("tool_choice"):
+        payload["tool_choice"] = body["tool_choice"]
+
+    headers = _make_cloud_headers()
+
+    r = await client.post(
+        OPENCODE_CLOUD_URL,
+        json=payload,
+        headers=headers,
+        timeout=300.0,
+    )
+
+    if r.status_code >= 400:
+        error_body = r.text[:1000] if r.text else "(empty body)"
+        raise RuntimeError(
+            f"OpenCode cloud API returned {r.status_code}: {error_body}"
+        )
+
+    try:
+        return r.json()
+    except json.JSONDecodeError:
+        raise RuntimeError(
+            f"OpenCode cloud API returned non-JSON: {r.text[:500]}"
+        )
 
 
 def resolve_model(requested: str) -> str:
@@ -430,7 +493,7 @@ class OpenCodeServeClient:
 app = FastAPI(
     title="Big Pickle Proxy",
     description="OpenAI-compatible API forwarding to OpenCode",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 config: dict = {}
@@ -492,7 +555,76 @@ async def chat_completions(request: Request):
     try:
         mode = config.get("mode", "cli")
 
-        if mode == "serve":
+        if mode == "cloud":
+            # ── Cloud mode: forward to OpenCode cloud API ──
+            import httpx as _httpx
+
+            # Cloud API uses plain model names — pass through as-is, no prefix
+            model_resolved = requested_model
+
+            if stream:
+                # Real streaming: forward SSE from OpenCode cloud API
+                headers = _make_cloud_headers()
+                payload = {
+                    "model": model_resolved,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": True,
+                }
+                if openai_tools:
+                    payload["tools"] = openai_tools
+                if tool_choice and tool_choice != "auto":
+                    payload["tool_choice"] = tool_choice
+
+                async def _cloud_stream():
+                    async with _httpx.AsyncClient(timeout=300.0) as sc:
+                        async with sc.stream(
+                            "POST",
+                            OPENCODE_CLOUD_URL,
+                            json=payload,
+                            headers=headers,
+                            timeout=300.0,
+                        ) as resp:
+                            if resp.status_code >= 400:
+                                body = await resp.aread()
+                                yield f"data: {json.dumps({'error': f'Upstream {resp.status_code}: {body.decode()[:500]}'})}\\n\\n"
+                                yield "data: [DONE]\\n\\n"
+                                return
+                            async for line in resp.aiter_lines():
+                                if line:
+                                    yield f"{line}\\n\\n"
+
+                return StreamingResponse(
+                    _cloud_stream(),
+                    media_type="text/event-stream",
+                )
+
+            # Non-streaming cloud request
+            cloud_body = {
+                "model": model_resolved,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if openai_tools:
+                cloud_body["tools"] = openai_tools
+            if tool_choice and tool_choice != "auto":
+                cloud_body["tool_choice"] = tool_choice
+
+            async with _httpx.AsyncClient(timeout=300.0) as cloud_client:
+                result = await _forward_cloud(cloud_client, cloud_body)
+
+            # OpenCode cloud returns OpenAI format — pass through with proxy IDs
+            request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            if isinstance(result, dict):
+                result["id"] = request_id
+                result["model"] = requested_model
+                if "created" not in result:
+                    result["created"] = int(time.time())
+            return result
+
+        elif mode == "serve":
             serve_port = config.get("serve_port", 4096)
             client = OpenCodeServeClient(f"http://127.0.0.1:{serve_port}")
 
@@ -588,7 +720,7 @@ async def chat_completions(request: Request):
         if stream:
             raise HTTPException(
                 status_code=400,
-                detail="Streaming requires serve mode (--mode serve)",
+                detail="Streaming requires serve or cloud mode (--mode serve|cloud)",
             )
 
         return response_body
@@ -629,8 +761,8 @@ def main():
                         help="Proxy listen port (default: 8000)")
     parser.add_argument("--host", type=str, default="127.0.0.1",
                         help="Proxy listen host (default: 127.0.0.1)")
-    parser.add_argument("--mode", choices=["cli", "serve"], default="cli",
-                        help="Backend mode: cli (subprocess) or serve (HTTP API)")
+    parser.add_argument("--mode", choices=["cli", "serve", "cloud"], default="cloud",
+                        help="Backend mode: cloud (default, direct API), serve (local opencode), cli (subprocess)")
     parser.add_argument("--serve-port", type=int, default=4096,
                         help="OpenCode serve port (default: 4096, serve mode only)")
     parser.add_argument("--timeout", type=int, default=120,
@@ -659,10 +791,14 @@ def main():
 
     import uvicorn
 
-    print(f"\n  Big Pickle Proxy v0.2.0")
+    print(f"\n  Big Pickle Proxy v0.3.0")
     print(f"  Mode:      {args.mode}")
     print(f"  Listen:    http://{args.host}:{args.port}")
     print(f"  Models:    {', '.join(MODEL_ALIASES.keys())}")
+    if args.mode == "cloud":
+        print(f"  Cloud API: {OPENCODE_CLOUD_URL}")
+        print(f"  Tool calls: enabled (forwarded to cloud API)")
+        print(f"  Streaming:  enabled")
     if args.mode == "serve":
         print(f"  OC Serve:  http://127.0.0.1:{args.serve_port}")
         print(f"  Tool calls: enabled (ensure OC permissions deny execution)")
