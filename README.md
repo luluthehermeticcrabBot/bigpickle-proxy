@@ -1,4 +1,4 @@
-# Big Pickle Proxy v0.3.0
+# Big Pickle Proxy v0.3.1
 
 OpenAI-compatible API proxy that forwards inference calls to OpenCode's cloud API
 using UUID-based authentication. **No API key needed.** No local OpenCode
@@ -175,6 +175,25 @@ OpenCode Zen Cloud API
 Your Agent ← proxy passes through with proxy IDs
 ```
 
+## Reasoning Control (v0.3.1+)
+
+`big-pickle` (DeepSeek V3) is a reasoning model — its thinking tokens count against
+`max_tokens`. The proxy **forwards `reasoning_effort`** to the Zen API (`"low"`,
+`"medium"`, `"high"`). Set this to limit reasoning depth and prevent the model
+from thinking so long that it exhausts `max_tokens` before producing output:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"big-pickle","messages":[{"role":"user","content":"Hello"}],
+       "max_tokens":4096,"reasoning_effort":"medium"}'
+```
+
+The proxy also **auto-bumps `max_tokens`** for known verbose models: `big-pickle`
+gets a minimum of 16384 tokens (up from the default 4096). This prevents
+`finish_reason="length"` responses where the model uses all tokens on reasoning
+and never produces content.
+
 ## Limitations
 
 - Free models only — paid models require an API key (not yet supported)
@@ -182,6 +201,7 @@ Your Agent ← proxy passes through with proxy IDs
 - Token counts and costs are reported as returned by the Zen API
 - Cloud mode rate limits are determined by OpenCode (no control from proxy side)
 - Previously-free models may have their promotions ended without notice — use `/v1/models` to check
+- DeepSeek V3 (`big-pickle`) reasoning can consume 8K+ tokens per request — plan `max_tokens` accordingly (or use `reasoning_effort`)
 
 ## License
 

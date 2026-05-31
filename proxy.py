@@ -548,7 +548,7 @@ class OpenCodeServeClient:
 app = FastAPI(
     title="Big Pickle Proxy",
     description="OpenAI-compatible API forwarding to OpenCode",
-    version="0.3.0",
+    version="0.3.1",
 )
 
 config: dict = {}
@@ -593,6 +593,21 @@ async def chat_completions(request: Request):
     max_tokens = body.get("max_tokens", 4096)
     openai_tools = body.get("tools", [])        # OpenAI-format tool definitions
     tool_choice = body.get("tool_choice", "auto")
+    reasoning_effort = body.get("reasoning_effort")  # reasoning budget control
+
+    # Known reasoning models need more max_tokens headroom because their
+    # thinking tokens count against the limit. Without this, the model
+    # can think until it exhausts max_tokens and produce no output at all
+    # (finish_reason="length" with empty content). This is especially
+    # noticeable in multi-turn scenarios like chess after move 4-7 where
+    # the position complexity triggers verbose reasoning.
+    REASONING_MODEL_MIN_TOKENS = {
+        "big-pickle": 16384,  # DeepSeek V3 — typically uses 6-10K thinking tokens
+    }
+    if requested_model in REASONING_MODEL_MIN_TOKENS:
+        _floor = REASONING_MODEL_MIN_TOKENS[requested_model]
+        if max_tokens < _floor:
+            max_tokens = _floor
 
     if not messages:
         raise HTTPException(status_code=400, detail="messages array is required")
@@ -651,6 +666,8 @@ async def chat_completions(request: Request):
                 payload["tools"] = openai_tools
             if tool_choice and tool_choice != "auto":
                 payload["tool_choice"] = tool_choice
+            if reasoning_effort:
+                payload["reasoning_effort"] = reasoning_effort
 
             if stream:
                 # Client wants streaming — forward SSE with chunk splitting
@@ -949,7 +966,7 @@ def main():
 
     import uvicorn
 
-    print(f"\n  Big Pickle Proxy v0.3.0")
+    print(f"\n  Big Pickle Proxy v0.3.1")
     print(f"  Mode:      {args.mode}")
     print(f"  Listen:    http://{args.host}:{args.port}")
     print(f"  Models:    {', '.join(MODEL_ALIASES.keys())}")
