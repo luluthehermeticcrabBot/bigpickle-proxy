@@ -605,7 +605,8 @@ async def chat_completions(request: Request):
     # noticeable in multi-turn scenarios like chess after move 4-7 where
     # the position complexity triggers verbose reasoning.
     REASONING_MODEL_MIN_TOKENS = {
-        "big-pickle": 16384,  # DeepSeek V3 — typically uses 6-10K thinking tokens
+        "big-pickle": 16384,              # DeepSeek V3 — verbose reasoning
+        "deepseek-v4-flash-free": 16384,  # Flash variant, still a reasoner
     }
     if requested_model in REASONING_MODEL_MIN_TOKENS:
         _floor = REASONING_MODEL_MIN_TOKENS[requested_model]
