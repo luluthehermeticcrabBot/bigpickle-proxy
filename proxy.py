@@ -34,6 +34,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+# Debug mode — set BPP_DEBUG=1 to log request params + response stats to stderr
+BPP_DEBUG = os.environ.get("BPP_DEBUG", "") == "1"
+
 # ── Model mapping ──────────────────────────────────────────────────────────
 
 MODEL_ALIASES = {
@@ -644,6 +647,14 @@ async def chat_completions(request: Request):
     try:
         mode = config.get("mode", "cli")
 
+        if BPP_DEBUG:
+            _tools_n = len(openai_tools)
+            _msg_n = len(messages)
+            _re = reasoning_effort or "none"
+            print(f"[BPP] REQ model={requested_model} mt={max_tokens} "
+                  f"re={_re} tools={_tools_n} msgs={_msg_n} stream={stream}",
+                  file=sys.stderr, flush=True)
+
         if mode == "cloud":
             # ── Cloud mode: forward to OpenCode cloud API ──
             import httpx as _httpx
@@ -794,6 +805,20 @@ async def chat_completions(request: Request):
             # Indentation breaks response into short lines, each under 16KB.
             from fastapi.responses import Response as _Response
             pretty = json.dumps(result, indent=2, ensure_ascii=False)
+
+            if BPP_DEBUG:
+                _tc = len(message.get("tool_calls", []))
+                _c = len(message.get("content") or "")
+                _rc = len(message.get("reasoning_content") or "")
+                _pt = usage.get("prompt_tokens", 0)
+                _ct = usage.get("completion_tokens", 0)
+                _tt = usage.get("total_tokens", 0)
+                _frac = f"{_ct}/{max_tokens}" if max_tokens else f"{_ct}"
+                print(f"[BPP] RES finish={finish_reason} content={_c}B "
+                      f"reasoning={_rc}B tool_calls={_tc} "
+                      f"tokens(in={_pt},out={_ct}/{_frac},total={_tt})",
+                      file=sys.stderr, flush=True)
+
             return _Response(
                 content=pretty,
                 media_type="application/json",
@@ -976,6 +1001,8 @@ def main():
         print(f"  Free models: {', '.join(free_models)}")
         print(f"  Tool calls: enabled (forwarded to cloud API)")
         print(f"  Streaming:  enabled")
+        if BPP_DEBUG:
+            print(f"  Debug:      BPP_DEBUG=1 (logging to stderr)")
     if args.mode == "serve":
         print(f"  OC Serve:  http://127.0.0.1:{args.serve_port}")
         print(f"  Tool calls: enabled (ensure OC permissions deny execution)")
