@@ -78,7 +78,7 @@ SSE_MAX_CHUNK = 8192
 def _split_sse_chunk(line: str) -> list[str]:
     """
     Split an oversized SSE data line into smaller valid chunks.
-    Preserves the SSE format: yields 'data: {...}\\n\\n' lines.
+    Preserves the SSE format: yields 'data: {...}\n\n' lines.
     """
     prefix = ""
     if line.startswith("data: "):
@@ -89,21 +89,21 @@ def _split_sse_chunk(line: str) -> list[str]:
         json_str = line[5:]
     else:
         # Not a data line, pass through as-is
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     # Non-data lines (comments, [DONE]) pass through
     if not json_str.strip().startswith("{"):
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     # Check if it's small enough
     if len(line) <= SSE_MAX_CHUNK:
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     # Parse and split the content field(s)
     try:
         chunk = json.loads(json_str)
     except json.JSONDecodeError:
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     # Find the content-bearing field in the delta
     delta = chunk.get("choices", [{}])[0].get("delta", {})
@@ -112,18 +112,18 @@ def _split_sse_chunk(line: str) -> list[str]:
 
     # If no oversized content, pass through
     if not content and not reasoning:
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     target_field = "reasoning_content" if reasoning else "content"
     text = reasoning or content
 
     if len(text) <= 2048:
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     # Split text at sentence boundaries (~1KB per chunk for streaming feel)
     sentences = _split_text(text, chunk_size=1024)
     if len(sentences) <= 1:
-        return [f"{line}\\n\\n"]
+        return [f"{line}\n\n"]
 
     # Emit multiple chunks with progressive content
     result = []
@@ -133,7 +133,7 @@ def _split_sse_chunk(line: str) -> list[str]:
             k: (sentence if k == target_field else v)
             for k, v in delta.items()
         }
-        result.append(f"{prefix}{json.dumps(new_chunk)}\\n\\n")
+        result.append(f"{prefix}{json.dumps(new_chunk)}\n\n")
     return result
 
 
@@ -694,8 +694,8 @@ async def chat_completions(request: Request):
                         ) as resp:
                             if resp.status_code >= 400:
                                 body = await resp.aread()
-                                yield f"data: {json.dumps({'error': f'Upstream {resp.status_code}: {body.decode()[:500]}'})}\\n\\n"
-                                yield "data: [DONE]\\n\\n"
+                                yield f"data: {json.dumps({'error': f'Upstream {resp.status_code}: {body.decode()[:500]}'})}\n\n"
+                                yield "data: [DONE]\n\n"
                                 return
                             async for line in resp.aiter_lines():
                                 if not line:
