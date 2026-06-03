@@ -759,6 +759,7 @@ async def chat_completions(request: Request):
                 message["content"] = None
             if merged_reasoning:
                 message["reasoning_content"] = merged_reasoning
+            # Always include tool_calls if present, even if content is empty
             if tool_calls_map:
                 message["tool_calls"] = [
                     tool_calls_map[i] for i in sorted(tool_calls_map)
