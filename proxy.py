@@ -784,6 +784,40 @@ async def chat_completions(request: Request):
             from fastapi.responses import Response as _Response
             pretty = json.dumps(result, indent=2, ensure_ascii=False)
 
+            # If the client requested streaming, wrap the JSON in a
+            # single SSE event (standard OpenAI streaming format) so
+            # Hermes' streaming client can parse it.
+            if stream:
+                choice = result["choices"][0]
+                msg = choice["message"]
+                chunk = {
+                    "id": result["id"],
+                    "object": "chat.completion.chunk",
+                    "created": result["created"],
+                    "model": result["model"],
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": msg.get("content", ""),
+                        },
+                        "finish_reason": choice["finish_reason"],
+                    }],
+                }
+                sse = (
+                    f"data: {json.dumps(chunk, ensure_ascii=False)}
+
+"
+                    "data: [DONE]
+
+"
+                )
+                return _Response(
+                    content=sse,
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+
             if BPP_DEBUG:
                 _tc = len(message.get("tool_calls", []))
                 _c = len(message.get("content") or "")
