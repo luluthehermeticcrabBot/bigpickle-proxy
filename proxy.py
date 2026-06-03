@@ -681,34 +681,11 @@ async def chat_completions(request: Request):
             if reasoning_effort:
                 payload["reasoning_effort"] = reasoning_effort
 
-            if stream:
-                # Client wants streaming — forward SSE with chunk splitting
-                async def _cloud_stream():
-                    async with _httpx.AsyncClient(timeout=300.0) as sc:
-                        async with sc.stream(
-                            "POST",
-                            OPENCODE_CLOUD_URL,
-                            json=payload,
-                            headers=headers,
-                            timeout=300.0,
-                        ) as resp:
-                            if resp.status_code >= 400:
-                                body = await resp.aread()
-                                yield f"data: {json.dumps({'error': f'Upstream {resp.status_code}: {body.decode()[:500]}'})}\n\n"
-                                yield "data: [DONE]\n\n"
-                                return
-                            async for line in resp.aiter_lines():
-                                if not line:
-                                    continue
-                                for chunk_line in _split_sse_chunk(line):
-                                    yield chunk_line
-
-                return StreamingResponse(
-                    _cloud_stream(),
-                    media_type="text/event-stream",
-                )
-
-            # Client wants non-streaming — buffer the SSE stream, return JSON
+            # Streaming is disabled — always buffer the upstream SSE stream
+            # and return an OpenAI-compatible JSON response.  Hermes' OpenAI
+            # client cannot handle the reasoning-only first chunk that the
+            # Zen API emits during SSE (content=null, reasoning_content="...").
+            # Buffering gives every client clean JSON.
             chunks: list[dict] = []
             finish_reason = "stop"
             usage = {}
