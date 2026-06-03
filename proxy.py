@@ -804,14 +804,7 @@ async def chat_completions(request: Request):
                         "finish_reason": choice["finish_reason"],
                     }],
                 }
-                sse = (
-                    f"data: {json.dumps(chunk, ensure_ascii=False)}
-
-"
-                    "data: [DONE]
-
-"
-                )
+                sse = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\ndata: [DONE]\n\n"
                 return _Response(
                     content=sse,
                     media_type="text/event-stream",
